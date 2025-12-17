@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "gemini-docs-processor"
+version = "1.0.0"
+description = "Procesa Google Docs con Gemini API y exporta a Markdown"
+authors = ["Diego Velez <diegovelezg@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+google-generativeai = "^0.3.2"
+python-dotenv = "^1.0.0"
+requests = "^2.31.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.3"
+black = "^23.0.0"
+flake8 = "^6.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+gemini-processor = "main:main"
