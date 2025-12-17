@@ -69,8 +69,8 @@ def extract_doc_id_from_url(url: str) -> str:
         raise ValueError(f"URL inválida de Google Docs: {url}")
     return match.group(1)
 
-def get_public_google_docs_content(doc_url: str) -> tuple[str, str]:
-    """Obtiene el contenido y título de un Google Doc público"""
+def get_public_google_docs_content(doc_url: str) -> tuple[str, str, str]:
+    """Obtiene el contenido, título y filename de un Google Doc público"""
     try:
         doc_id = extract_doc_id_from_url(doc_url)
 
@@ -97,16 +97,38 @@ def get_public_google_docs_content(doc_url: str) -> tuple[str, str]:
         except:
             pass
 
-        return content, title
+        # Generar filename seguro basado en el título
+        import re
+        # Limpiar el título para usar como filename
+        safe_filename = re.sub(r'[<>:"/\\|?*]', '', title)  # Remover caracteres inválidos
+        safe_filename = re.sub(r'\s+', '_', safe_filename.strip())  # Reemplazar espacios con guiones bajos
+        safe_filename = safe_filename[:50]  # Limitar longitud
+
+        if not safe_filename or len(safe_filename) < 3:
+            # Fallback al doc_id si no hay título válido
+            safe_filename = f"doc_{doc_id[:8]}"
+
+        filename = f"{safe_filename}.md"
+
+        return content, title, filename
 
     except Exception as e:
         print(f"❌ Error obteniendo Google Doc {doc_url}: {str(e)}")
         print("💡 Asegúrate de que el documento sea público o accesible para cualquiera con el enlace")
         raise
 
+def ensure_output_directory() -> str:
+    """Asegura que la carpeta output exista y retorna su path"""
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
 def write_to_markdown_file(file_path: str, text: str) -> None:
     """Escribe texto en un archivo Markdown (sobrescribe o crea)"""
     try:
+        # Asegurar que el directorio existe
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(text)
         print(f"✅ Resultados guardados en {file_path}")
@@ -183,11 +205,15 @@ def main():
 
         print(f"🤖 Usando modelo: {GEMINI_MODEL}")
 
+        # Asegurar carpeta de salida
+        output_dir = ensure_output_directory()
+
         # Leer Google Doc origen
         print(f"📄 Leyendo Google Doc origen: {SOURCE_DOC_URL}")
-        source_content, doc_title = get_public_google_docs_content(SOURCE_DOC_URL)
+        source_content, doc_title, doc_filename = get_public_google_docs_content(SOURCE_DOC_URL)
         print(f"✅ Documento leído ({len(source_content)} caracteres)")
         print(f"📋 Título detectado: {doc_title}")
+        print(f"📁 Filename generado: {doc_filename}")
 
         # Cargar prompts desde archivos
         prompts = load_prompts_from_files(PROMPTS_TO_USE)
@@ -214,14 +240,15 @@ def main():
         # Formatear resultados
         formatted_output = format_results(results, doc_title, SOURCE_DOC_URL)
 
-        # Escribir en archivo destino
-        print(f"\n💾 Escribiendo resultados en: {DESTINATION_FILE}")
-        write_to_markdown_file(DESTINATION_FILE, formatted_output)
+        # Escribir en archivo destino dentro de carpeta output/
+        output_path = os.path.join(output_dir, doc_filename)
+        print(f"\n💾 Escribiendo resultados en: {output_path}")
+        write_to_markdown_file(output_path, formatted_output)
 
         print(f"\n🎉 Procesamiento completado exitosamente!")
         print(f"📊 Se procesaron {len(prompts)} prompts")
         print(f"💾 Cache: {len(cache)} respuestas cacheadas")
-        print(f"📁 Resultados guardados en: {DESTINATION_FILE}")
+        print(f"📁 Resultados guardados en: {output_path}")
 
     except Exception as e:
         print(f"\n❌ Error fatal: {str(e)}")

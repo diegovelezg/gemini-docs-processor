@@ -65,6 +65,7 @@ output.md
 *.output.md
 results.md
 analysis.md
+output/
 
 # Cache files
 .cache/
