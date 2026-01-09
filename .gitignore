@@ -65,7 +65,7 @@ output.md
 *.output.md
 results.md
 analysis.md
-output/
+# NOTA: La carpeta output/ SÍ se sincroniza (contiene resultados importantes)
 
 # Cache files
 .cache/
