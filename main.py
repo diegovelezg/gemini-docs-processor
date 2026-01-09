@@ -5,21 +5,18 @@ import hashlib
 import requests
 import json
 import time
+import asyncio
 from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
-# Gemini API
-import google.generativeai as genai
+# Gemini API - Nuevo SDK (google-genai)
+from google import genai
+from google.genai import types
 
-# Batch API (Vertex AI)
-try:
-    from google.cloud import aiplatform
-    from google.genai import types as genai_types
-    BATCH_API_AVAILABLE = True
-except ImportError:
-    BATCH_API_AVAILABLE = False
-    print("⚠️  Batch API no disponible. Install google-cloud-aiplatform for batch processing.")
+# Procesamiento paralelo con AsyncIO
+# AsyncIO permite procesar múltiples prompts en paralelo de forma eficiente
+ASYNC_PROCESSING_AVAILABLE = True
 
 # Cargar variables de entorno
 load_dotenv()
@@ -37,11 +34,20 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 PROMPTS_TO_USE = os.getenv("PROMPTS_TO_USE", "01_disonancias.md,02_complejidad.md, 03_clima.md, 04_hacks.md, 05_estratega.md")
 
 # 🔧 MODO DE PROCESAMIENTO: CAMBIA AQUÍ 🔧
-# Opciones: "normal" (tiempo real) o "batch" (50% más económico)
-PROCESSING_MODE = "batch"  # <-- CAMBIA ESTA LÍNEA
+# Opciones: "normal" (secuencial), "parallel" (paralelo con AsyncIO - más rápido), o "batch" (Batch API - 50% más económico)
+PROCESSING_MODE = "batch"  # "normal", "parallel" o "batch"
 
 # Variables globales
+client = None  # Cliente de Gemini
 cached_content = None
+
+
+def initialize_client():
+    """Inicializa el cliente de Gemini"""
+    global client
+    if client is None:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    return client
 
 def get_google_docs_from_shared_folder(folder_id: str) -> List[str]:
     """Obtiene todos los Google Docs de una carpeta compartida usando web scraping"""
@@ -309,36 +315,48 @@ def write_to_markdown_file(file_path: str, text: str) -> None:
 
 
 def create_cached_content(document_text: str):
-    """Crea contenido cacheado para reutilizar con múltiples prompts"""
+    """Crea contenido cacheado para reutilizar con múltiples prompts usando la nueva API"""
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        initialize_client()
 
         # Crear contenido cacheado con el documento
-        cached_content = genai.caching.CachedContent.create(
+        # Usar la nueva API: client.caches.create()
+        cache = client.caches.create(
             model=GEMINI_MODEL,
-            content=document_text,
-            display_name="Document Analysis Context"
+            config=types.CreateCachedContentConfig(
+                display_name='Document Analysis Context',
+                contents=[{'parts': [{'text': document_text}]}],
+                ttl="3600s",  # 1 hora de TTL
+            )
         )
 
-        print(f"✅ Contenido cacheado creado (ID: {cached_content.name})")
-        print(f"💾 Tokens cacheados: {cached_content.usage.metadata.total_token_count:,}")
+        print(f"✅ Contenido cacheado creado (ID: {cache.name})")
 
-        return cached_content
+        # Acceder a los metadatos si están disponibles
+        if hasattr(cache, 'usage_metadata'):
+            print(f"💾 Tokens cacheados: {cache.usage_metadata.total_token_count:,}")
+        else:
+            print(f"💾 Contenido cacheado creado exitosamente")
+
+        return cache
 
     except Exception as e:
         print(f"❌ Error creando contenido cacheado: {str(e)}")
         print("💡 El script continuará sin caching oficial")
         return None
 
-def call_gemini_with_cache(prompt: str, cached_content=None) -> Tuple[str, int, int]:
-    """Llama a Gemini API usando contenido cacheado"""
+def call_gemini_with_cache(prompt: str, cache=None) -> Tuple[str, int, int]:
+    """Llama a Gemini API usando contenido cacheado con la nueva API"""
     try:
-        if cached_content:
-            # Usar contenido cacheado
-            model = genai.GenerativeModel.from_cached_content(cached_content=cached_content)
+        initialize_client()
 
-            # Solo enviar el prompt (el documento ya está cacheado)
-            response = model.generate_content(prompt)
+        if cache:
+            # Usar contenido cacheado
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(cached_content=cache.name)
+            )
 
             if response.text:
                 # Extraer tokens de los metadatos
@@ -349,7 +367,6 @@ def call_gemini_with_cache(prompt: str, cached_content=None) -> Tuple[str, int, 
                     output_tokens = response.usage_metadata.candidates_token_count
                     input_tokens = response.usage_metadata.prompt_token_count
                 else:
-                    # Fallback: estimar
                     output_tokens = len(response.text.split()) // 4
                     input_tokens = len(prompt.split()) // 4
 
@@ -366,18 +383,69 @@ def call_gemini_with_cache(prompt: str, cached_content=None) -> Tuple[str, int, 
         print("🔄 Intentando sin caching...")
         return call_gemini_without_cache(prompt)
 
-def call_gemini_without_cache(prompt: str) -> Tuple[str, int, int]:
-    """Fallback sin caching oficial"""
+async def call_gemini_async(prompt: str, cache=None) -> Tuple[str, int, int]:
+    """Llama a Gemini API de forma asíncrona usando contenido cacheado con la nueva API"""
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(GEMINI_MODEL)
+        initialize_client()
 
-        response = model.generate_content(prompt)
+        if cache:
+            # Usar contenido cacheado
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(cached_content=cache.name)
+            )
+        else:
+            # Sin caché
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt
+            )
 
         if response.text:
             # Extraer tokens
-            input_tokens = len(prompt.split()) // 4  # Estimación
-            output_tokens = len(response.text.split()) // 4
+            input_tokens = 0
+            output_tokens = 0
+
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                output_tokens = response.usage_metadata.candidates_token_count
+                input_tokens = response.usage_metadata.prompt_token_count
+            else:
+                output_tokens = len(response.text.split()) // 4
+                input_tokens = len(prompt.split()) // 4
+
+            cache_status = "con caching" if cache else "sin caching"
+            print(f"🤖 Respuesta generada {cache_status} (Prompt: {input_tokens:,}, Output: {output_tokens:,} tokens)")
+            return response.text, input_tokens, output_tokens
+        else:
+            raise ValueError("La respuesta de Gemini está vacía")
+
+    except Exception as e:
+        print(f"❌ Error en llamada asíncrona: {str(e)}")
+        raise
+
+
+def call_gemini_without_cache(prompt: str) -> Tuple[str, int, int]:
+    """Fallback sin caching usando la nueva API"""
+    try:
+        initialize_client()
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt
+        )
+
+        if response.text:
+            # Extraer tokens
+            input_tokens = 0
+            output_tokens = 0
+
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                output_tokens = response.usage_metadata.candidates_token_count
+                input_tokens = response.usage_metadata.prompt_token_count
+            else:
+                input_tokens = len(prompt.split()) // 4
+                output_tokens = len(response.text.split()) // 4
 
             print(f"🤖 Respuesta generada sin caching (Input: {input_tokens:,}, Output: {output_tokens:,} tokens)")
             return response.text, input_tokens, output_tokens
@@ -388,43 +456,45 @@ def call_gemini_without_cache(prompt: str) -> Tuple[str, int, int]:
         print(f"❌ Error en fallback: {str(e)}")
         raise
 
-def cleanup_cached_content(cached_content):
-    """Limpia el contenido cacheado"""
+def cleanup_cached_content(cache):
+    """Limpia el contenido cacheado usando la nueva API"""
     try:
-        if cached_content:
-            cached_content.delete()
+        if cache:
+            initialize_client()
+            client.caches.delete(name=cache.name)
             print(f"🗑️  Contenido cacheado eliminado")
     except Exception as e:
         print(f"⚠️  Error limpiando caché: {str(e)}")
 
 def create_batch_job(prompts_data: List[Dict], document_text: str):
-    """Crea un job de batch processing"""
-    if not BATCH_API_AVAILABLE:
-        raise ImportError("Batch API no disponible. Install google-cloud-aiplatform")
-
+    """Crea un batch job usando la API oficial de Gemini"""
     try:
-        # Preparar las solicitudes para el batch
-        requests_list = []
-        for i, prompt_data in enumerate(prompts_data):
-            full_prompt = f"{prompt_data['content']}\n\n--- DOCUMENTO ---\n{document_text}"
+        initialize_client()
 
-            request = genai_types.CreateBatchRequest(
-                model=GEMINI_MODEL,
-                contents=[{"role": "user", "parts": [{"text": full_prompt}]}],
-                generation_config=genai_types.GenerationConfig(
-                    temperature=0.7,
-                )
-            )
-            requests_list.append(request)
+        # Preparar inline requests para el batch
+        inline_requests = []
+        for prompt_data in prompts_data:
+            full_prompt = f"{prompt_data['content']}\n\n--- DOCUMENTO ---\n{document_text}"
+            request = {
+                'contents': [{
+                    'parts': [{'text': full_prompt}],
+                    'role': 'user'
+                }]
+            }
+            inline_requests.append(request)
 
         # Crear el batch job
-        batch_job = genai.caching.batch_create(
-            requests=requests_list,
-            display_name=f"Document_Analysis_{int(time.time())}"
+        batch_job = client.batches.create(
+            model=GEMINI_MODEL,
+            src=inline_requests,
+            config={
+                'display_name': f"Document_Analysis_{int(time.time())}",
+            },
         )
 
         print(f"🚀 Batch job creado: {batch_job.name}")
         print(f"📊 Prompts encolados: {len(prompts_data)}")
+        print(f"⏳ El batch job tardará hasta 24 horas en completarse")
 
         return batch_job
 
@@ -433,29 +503,30 @@ def create_batch_job(prompts_data: List[Dict], document_text: str):
         raise
 
 def monitor_batch_job(batch_job, timeout_minutes=30):
-    """Monitorea el progreso del batch job"""
-    if not BATCH_API_AVAILABLE:
-        return []
-
+    """Monitorea el progreso del batch job hasta completarse"""
     start_time = time.time()
     timeout_seconds = timeout_minutes * 60
 
     print(f"⏳ Monitoreando batch job (timeout: {timeout_minutes} min)...")
 
+    completed_states = {
+        'JOB_STATE_SUCCEEDED',
+        'JOB_STATE_FAILED',
+        'JOB_STATE_CANCELLED',
+        'JOB_STATE_EXPIRED'
+    }
+
     while True:
         try:
             # Obtener estado actual
-            current_job = genai.caching.batch_get(name=batch_job.name)
+            current_job = client.batches.get(name=batch_job.name)
 
-            if current_job.state == genai_types.BatchJob.State.SUCCEEDED:
-                print(f"✅ Batch job completado exitosamente")
-                return extract_batch_results(current_job)
-
-            elif current_job.state == genai_types.BatchJob.State.FAILED:
-                raise Exception(f"Batch job falló: {current_job.error}")
-
-            elif current_job.state == genai_types.BatchJob.State.CANCELLED:
-                raise Exception("Batch job fue cancelado")
+            # Verificar si terminó
+            if current_job.state.name in completed_states:
+                print(f"✅ Batch job completado con estado: {current_job.state.name}")
+                if current_job.state.name == 'JOB_STATE_FAILED':
+                    print(f"❌ Error: {current_job.error}")
+                return current_job
 
             # Verificar timeout
             elapsed = time.time() - start_time
@@ -463,46 +534,74 @@ def monitor_batch_job(batch_job, timeout_minutes=30):
                 raise Exception(f"Batch job timeout después de {timeout_minutes} minutos")
 
             # Mostrar progreso
-            progress = getattr(current_job, 'progress_percent', 0)
-            print(f"⏳ Progreso: {progress}% (elapsed: {int(elapsed)}s)")
+            print(f"⏳ Estado actual: {current_job.state.name} (elapsed: {int(elapsed)}s)")
 
-            time.sleep(10)  # Esperar 10 segundos antes de verificar nuevamente
+            # Esperar antes de volver a verificar
+            time.sleep(30)  # Esperar 30 segundos
 
         except Exception as e:
             print(f"❌ Error monitoreando batch job: {str(e)}")
             raise
 
-def extract_batch_results(completed_job):
+def extract_batch_results(completed_job, prompts_data: List[Dict]):
     """Extrae los resultados del batch job completado"""
     try:
         results = []
 
-        # Obtener los resultados de cada request
-        for i, response in enumerate(completed_job.responses):
-            if response.candidates and len(response.candidates) > 0:
-                content = response.candidates[0].content.parts[0].text
+        # Verificar si el job fue exitoso
+        if completed_job.state.name != 'JOB_STATE_SUCCEEDED':
+            raise Exception(f"Batch job no completó exitosamente: {completed_job.state.name}")
 
-                # Extraer metadata de tokens si está disponible
-                input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
-                output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+        # Obtener respuestas inline
+        if hasattr(completed_job, 'dest') and hasattr(completed_job.dest, 'inlined_responses'):
+            inline_responses = completed_job.dest.inlined_responses
 
-                results.append({
-                    "prompt_numero": i + 1,
-                    "respuesta": content,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": input_tokens + output_tokens,
-                    "error": None
-                })
-            else:
-                results.append({
-                    "prompt_numero": i + 1,
-                    "respuesta": "",
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "error": "No se obtuvo respuesta"
-                })
+            for i, inline_response in enumerate(inline_responses):
+                if i >= len(prompts_data):
+                    break
+
+                if inline_response.response:
+                    # Extraer texto de la respuesta
+                    response_text = inline_response.response.text if hasattr(inline_response.response, 'text') else str(inline_response.response)
+
+                    # Extraer tokens si están disponibles
+                    input_tokens = 0
+                    output_tokens = 0
+
+                    if hasattr(inline_response.response, 'usage_metadata'):
+                        metadata = inline_response.response.usage_metadata
+                        input_tokens = getattr(metadata, 'prompt_token_count', 0)
+                        output_tokens = getattr(metadata, 'candidates_token_count', 0)
+
+                    results.append({
+                        "prompt_numero": i + 1,
+                        "prompt_title": prompts_data[i]["title"],
+                        "prompt_filename": prompts_data[i]["filename"],
+                        "prompt": prompts_data[i]["content"],
+                        "respuesta": response_text,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens,
+                        "error": None,
+                        "cache_usado": False
+                    })
+                else:
+                    # Error en la respuesta
+                    error_msg = inline_response.error if hasattr(inline_response, 'error') else "No se obtuvo respuesta"
+                    results.append({
+                        "prompt_numero": i + 1,
+                        "prompt_title": prompts_data[i]["title"],
+                        "prompt_filename": prompts_data[i]["filename"],
+                        "prompt": prompts_data[i]["content"],
+                        "respuesta": "",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "error": error_msg,
+                        "cache_usado": False
+                    })
+        else:
+            raise Exception("No se encontraron respuestas inline en el batch job")
 
         return results
 
@@ -511,35 +610,104 @@ def extract_batch_results(completed_job):
         raise
 
 def process_prompts_batch(prompts_data: List[Dict], document_text: str):
-    """Procesa prompts usando Batch API"""
-    if not BATCH_API_AVAILABLE:
-        print("⚠️  Batch API no disponible, usando modo normal")
-        return process_prompts_normal(prompts_data, document_text)
-
+    """Procesa prompts usando Batch API oficial"""
     try:
+        print(f"🚀 Usando BATCH API (50% más económico, tiempo de espera: hasta 24 horas)")
+
         # Crear batch job
         batch_job = create_batch_job(prompts_data, document_text)
 
-        # Monitorear y obtener resultados
-        results = monitor_batch_job(batch_job)
+        # Monitorear y obtener resultados (con timeout de 30 min para demo)
+        print(f"⚠️  NOTA: Para producción, considera aumentar el timeout o implementar polling asíncrono")
+        completed_job = monitor_batch_job(batch_job, timeout_minutes=30)
 
-        # Combinar con metadata de los prompts originales
-        for i, result in enumerate(results):
-            if i < len(prompts_data):
-                result.update({
-                    "prompt_title": prompts_data[i]["title"],
-                    "prompt_filename": prompts_data[i]["filename"],
-                    "prompt": prompts_data[i]["content"]
-                })
+        # Extraer resultados
+        results = extract_batch_results(completed_job, prompts_data)
 
         return results
 
     except Exception as e:
         print(f"❌ Error en batch processing: {str(e)}")
         print("🔄 Fallback a modo normal con caché...")
-        return process_prompts_normal(prompts_data, document_text, None)  # Sin caché en fallback
+        return process_prompts_normal(prompts_data, document_text, None)
 
-def process_prompts_normal(prompts_data: List[Dict], document_text: str, cached_content=None):
+async def process_single_prompt_async(prompt_data: Dict, cache=None) -> Dict:
+    """Procesa un solo prompt de forma asíncrona"""
+    try:
+        if cache:
+            # Con caché oficial: solo enviar el prompt
+            full_prompt = f"{prompt_data['content']}\n\n--- ANALIZAR EL DOCUMENTO CACHEADO ---"
+        else:
+            # Sin caché: enviar prompt + documento completo
+            full_prompt = f"{prompt_data['content']}\n\n--- DOCUMENTO ---\n{prompt_data.get('document_text', '')}"
+
+        result, input_tokens, output_tokens = await call_gemini_async(full_prompt, cache)
+
+        return {
+            "prompt_numero": prompt_data.get('index', 0) + 1,
+            "prompt_title": prompt_data["title"],
+            "prompt_filename": prompt_data["filename"],
+            "prompt": prompt_data["content"],
+            "respuesta": result,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "error": None,
+            "cache_usado": cache is not None
+        }
+    except Exception as e:
+        return {
+            "prompt_numero": prompt_data.get('index', 0) + 1,
+            "prompt_title": prompt_data["title"],
+            "prompt_filename": prompt_data["filename"],
+            "prompt": prompt_data["content"],
+            "respuesta": "",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "error": str(e),
+            "cache_usado": False
+        }
+
+
+async def process_prompts_parallel_async(prompts_data: List[Dict], document_text: str, cache=None):
+    """Procesa múltiples prompts en paralelo usando AsyncIO"""
+    print(f"🚀 Procesando {len(prompts_data)} prompts en paralelo con AsyncIO...")
+
+    # Preparar prompts con el documento
+    enriched_prompts = []
+    for i, prompt_data in enumerate(prompts_data):
+        prompt_copy = prompt_data.copy()
+        prompt_copy['index'] = i
+        if not cache:
+            prompt_copy['document_text'] = document_text
+        enriched_prompts.append(prompt_copy)
+
+    # Crear tareas asíncronas para procesar todos los prompts en paralelo
+    tasks = [
+        process_single_prompt_async(prompt_data, cache)
+        for prompt_data in enriched_prompts
+    ]
+
+    # Ejecutar todas las tareas en paralelo y esperar resultados
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    print(f"✅ Todos los prompts procesados en paralelo")
+    return results
+
+
+def process_prompts_parallel(prompts_data: List[Dict], document_text: str, cache=None):
+    """Wrapper síncrono para procesar prompts en paralelo"""
+    try:
+        # Ejecutar la función asíncrona
+        results = asyncio.run(process_prompts_parallel_async(prompts_data, document_text, cache))
+        return results
+    except Exception as e:
+        print(f"❌ Error en procesamiento paralelo: {str(e)}")
+        print("🔄 Fallback a modo normal...")
+        return process_prompts_normal(prompts_data, document_text, cache)
+
+def process_prompts_normal(prompts_data: List[Dict], document_text: str, cache=None):
     """Procesa prompts usando API normal con caché oficial optimizado"""
     results = []
 
@@ -547,7 +715,7 @@ def process_prompts_normal(prompts_data: List[Dict], document_text: str, cached_
         print(f"\n📍 Prompt {i+1}/{len(prompts_data)}: {prompt_data['title']}")
         print(f"📝 Archivo: {prompt_data['filename']}")
 
-        if cached_content:
+        if cache:
             # ✅ Con caché oficial: solo enviar el prompt (documento ya cacheado)
             full_prompt = f"{prompt_data['content']}\n\n--- ANALIZAR EL DOCUMENTO CACHEADO ---"
             print(f"🚀 Usando caché oficial (documento pre-cargado)")
@@ -556,7 +724,7 @@ def process_prompts_normal(prompts_data: List[Dict], document_text: str, cached_
             full_prompt = f"{prompt_data['content']}\n\n--- DOCUMENTO ---\n{document_text}"
             print(f"⚠️  Modo fallback (sin caché)")
 
-        result, input_tokens, output_tokens = call_gemini_with_cache(full_prompt, cached_content)
+        result, input_tokens, output_tokens = call_gemini_with_cache(full_prompt, cache)
         results.append({
             "prompt_numero": i + 1,
             "prompt_title": prompt_data["title"],
@@ -567,7 +735,7 @@ def process_prompts_normal(prompts_data: List[Dict], document_text: str, cached_
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
             "error": None,
-            "cache_usado": cached_content is not None
+            "cache_usado": cache is not None
         })
 
     return results
@@ -585,16 +753,19 @@ def process_single_document(doc_url: str, doc_index: int, total_docs: int, promp
 
         # Crear caché para este documento
         print(f"🚀 Creando caché del documento...")
-        cached_content = create_cached_content(source_content)
+        cache = create_cached_content(source_content)
 
         # Procesar prompts
         print(f"🧠 Procesando {len(prompts)} prompts...")
         if PROCESSING_MODE == "batch":
-            print(f"🚀 Usando BATCH API")
+            print(f"⚡ Usando BATCH API (50% más económico)")
             results = process_prompts_batch(prompts, source_content)
+        elif PROCESSING_MODE == "parallel":
+            print(f"⚡ Usando MODO PARALELO (AsyncIO)")
+            results = process_prompts_parallel(prompts, source_content, cache)
         else:
-            print(f"⚡ Usando API NORMAL con caché")
-            results = process_prompts_normal(prompts, source_content, cached_content)
+            print(f"📝 Usando MODO NORMAL (secuencial)")
+            results = process_prompts_normal(prompts, source_content, cache)
 
         # Formatear resultados
         formatted_output = format_results(results, doc_title, doc_url)
@@ -606,16 +777,16 @@ def process_single_document(doc_url: str, doc_index: int, total_docs: int, promp
         print(f"✅ Documento {doc_index+1} completado: {output_path}")
 
         # Limpiar caché
-        if cached_content:
-            cleanup_cached_content(cached_content)
+        if cache:
+            cleanup_cached_content(cache)
 
         return output_path
 
     except Exception as e:
         print(f"❌ Error procesando documento {doc_index+1}: {str(e)}")
         # Limpiar caché en caso de error
-        if 'cached_content' in locals() and cached_content:
-            cleanup_cached_content(cached_content)
+        if 'cache' in locals() and cache:
+            cleanup_cached_content(cache)
         return None
 
 def load_processed_documents() -> set:
@@ -740,7 +911,13 @@ def main():
             return
 
         print(f"🤖 Usando modelo: {GEMINI_MODEL}")
-        print(f"🔧 Modo de procesamiento: {PROCESSING_MODE.upper()}")
+        if PROCESSING_MODE == "batch":
+            mode_name = "BATCH API (50% más económico)"
+        elif PROCESSING_MODE == "parallel":
+            mode_name = "PARALELO (AsyncIO)"
+        else:
+            mode_name = "NORMAL (secuencial)"
+        print(f"⚡ Modo de procesamiento: {mode_name}")
 
         # Obtener documentos automáticamente de la carpeta compartida
         print(f"📂 Obteniendo Google Docs de la carpeta compartida...")
