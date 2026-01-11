@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import os
 import re
+import csv
 import requests
-from typing import List, Tuple
+from typing import List, Tuple, Set
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
@@ -30,6 +31,54 @@ def init_client():
     global client
     if not client:
         client = genai.Client(api_key=GEMINI_API_KEY)
+
+
+def load_processed_schools() -> Set[str]:
+    """Carga la lista de escuelas ya procesadas desde el archivo de tracking"""
+    tracking_file = os.path.join("output/matriz", "processed_schools.csv")
+    processed = set()
+
+    if os.path.exists(tracking_file):
+        try:
+            with open(tracking_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    processed.add(row['school'])
+
+            print(f"📋 Cargadas {len(processed)} escuelas ya procesadas")
+        except Exception as e:
+            print(f"⚠️  Error leyendo archivo de tracking: {e}")
+
+    return processed
+
+
+def save_processed_school(school: str, filepath: str, total_in: int, total_out: int):
+    """Guarda información de la escuela procesada en el archivo de tracking"""
+    tracking_file = os.path.join("output/matriz", "processed_schools.csv")
+
+    try:
+        file_exists = os.path.exists(tracking_file)
+
+        with open(tracking_file, 'a', encoding='utf-8', newline='') as f:
+            fieldnames = ['timestamp', 'school', 'filepath', 'total_in', 'total_out']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+            if not file_exists:
+                writer.writeheader()
+
+            from datetime import datetime
+            writer.writerow({
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'school': school,
+                'filepath': filepath,
+                'total_in': total_in,
+                'total_out': total_out
+            })
+
+        print(f"💾 Escuela guardada en tracking: {school}")
+
+    except Exception as e:
+        print(f"⚠️  Error guardando tracking: {e}")
 
 
 def load_prompt(path: str) -> str:
@@ -189,8 +238,12 @@ def cleanup_cache(cache):
             pass
 
 
-def call_gemini(prompt: str, cache=None) -> Tuple[str, int, int]:
-    """Llama a Gemini"""
+def call_gemini(prompt: str, cache=None) -> Tuple[str, int, int, int]:
+    """Llama a Gemini
+
+    Returns:
+        Tuple[text, total_input_tokens, cached_tokens, output_tokens]
+    """
     init_client()
 
     if cache:
@@ -209,16 +262,22 @@ def call_gemini(prompt: str, cache=None) -> Tuple[str, int, int]:
         raise ValueError("Respuesta vacía")
 
     # Tokens
-    in_t = out_t = 0
+    in_t = cached_t = out_t = 0
     if hasattr(resp, 'usage_metadata') and resp.usage_metadata:
-        out_t = resp.usage_metadata.candidates_token_count
-        in_t = resp.usage_metadata.prompt_token_count
+        out_t = resp.usage_metadata.candidates_token_count or 0
+        in_t = resp.usage_metadata.prompt_token_count or 0
+        # Tokens cacheados (facturados a tarifa reducida)
+        cached_t = getattr(resp.usage_metadata, 'cached_content_token_count', 0) or 0
 
-    return resp.text, in_t, out_t
+    return resp.text, in_t, cached_t, out_t
 
 
-def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], out_dir: str):
-    """Procesa todos los documentos de una escuela con todas las dimensiones"""
+def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], out_dir: str) -> Tuple[str, int, int]:
+    """Procesa todos los documentos de una escuela con todas las dimensiones
+
+    Returns:
+        Tuple[filepath, total_in_tokens, total_out_tokens]
+    """
 
     print(f"\n{'='*80}")
     print(f"📊 {escuela}")
@@ -229,7 +288,7 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
 
     if not escuela_docs:
         print(f"⚠️  Sin docs")
-        return None
+        return None, 0, 0
 
     # Crear UN SOLO archivo de salida para esta escuela
     safe_name = escuela.replace('_', '').replace('-', '').lower()
@@ -252,7 +311,7 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
         f.write(header)
 
     # Token counters por dimensión
-    tokens_por_dim = [[0, 0] for _ in range(4)]  # [in, out] para cada dimensión
+    tokens_por_dim = [[0, 0, 0] for _ in range(4)]  # [in, cached, out] para cada dimensión
 
     # Títulos de las dimensiones
     dim_titles = [
@@ -283,10 +342,12 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
 
         # Aplicar los 4 prompts al mismo documento (reutilizando cache)
         for dim_idx, dim_prompt in enumerate(dim_prompts):
-            full_prompt = f"{dim_prompt}\n\n--- DOCUMENTO A ANALIZAR ---\n{full_doc}"
+            # El documento ya está en el cache, NO incluirlo en el prompt
+            # Solo enviar las instrucciones del prompt
+            prompt_with_cache = f"{dim_prompt}\n\nNOTA: El documento a analizar ha sido proporcionado en el contexto cacheado."
 
             try:
-                result, in_t, out_t = call_gemini(full_prompt, cache)
+                result, in_t, cached_t, out_t = call_gemini(prompt_with_cache, cache)
 
                 # Formatear resultado con título de dimensión
                 formatted = f"\n{'='*80}\n"
@@ -301,9 +362,12 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
 
                 # Acumular tokens
                 tokens_por_dim[dim_idx][0] += in_t
-                tokens_por_dim[dim_idx][1] += out_t
+                tokens_por_dim[dim_idx][1] += cached_t
+                tokens_por_dim[dim_idx][2] += out_t
 
-                print(f"      ✅ Dim {dim_idx + 1}: IN={in_t:,} OUT={out_t:,}")
+                # Calcular tokens no-cacheados (billing real)
+                non_cached = in_t - cached_t
+                print(f"      ✅ Dim {dim_idx + 1}: IN={in_t:,} (cached={cached_t:,} ~{cached_t*100//in_t if in_t > 0 else 0}%) OUT={out_t:,}")
 
             except Exception as e:
                 print(f"      ❌ Dim {dim_idx + 1}: {e}")
@@ -321,13 +385,22 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
     footer += "=" * 80 + "\n"
 
     for dim_idx in range(4):
-        footer += f"Dim {dim_idx + 1}: IN={tokens_por_dim[dim_idx][0]:,} OUT={tokens_por_dim[dim_idx][1]:,} TOTAL={tokens_por_dim[dim_idx][0] + tokens_por_dim[dim_idx][1]:,}\n"
+        in_t = tokens_por_dim[dim_idx][0]
+        cached_t = tokens_por_dim[dim_idx][1]
+        out_t = tokens_por_dim[dim_idx][2]
+        non_cached = in_t - cached_t
+        cache_pct = cached_t * 100 // in_t if in_t > 0 else 0
+
+        footer += f"Dim {dim_idx + 1}: IN={in_t:,} (cached={cached_t:,} ~{cache_pct}%, non-cached={non_cached:,}) OUT={out_t:,}\n"
 
     total_in = sum(t[0] for t in tokens_por_dim)
-    total_out = sum(t[1] for t in tokens_por_dim)
+    total_cached = sum(t[1] for t in tokens_por_dim)
+    total_out = sum(t[2] for t in tokens_por_dim)
+    total_non_cached = total_in - total_cached
+    overall_cache_pct = total_cached * 100 // total_in if total_in > 0 else 0
 
     footer += "-" * 80 + "\n"
-    footer += f"TOTAL: IN={total_in:,} OUT={total_out:,} TOTAL={total_in + total_out:,}\n"
+    footer += f"TOTAL: IN={total_in:,} (cached={total_cached:,} ~{overall_cache_pct}%, non-cached={total_non_cached:,}) OUT={total_out:,}\n"
     footer += "=" * 80 + "\n"
     footer += "✨ Fin\n"
     footer += "=" * 80 + "\n"
@@ -336,9 +409,9 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
         f.write(footer)
 
     print(f"\n   ✅ {filepath}")
-    print(f"   🤖 Total: IN={total_in:,} OUT={total_out:,}")
+    print(f"   🤖 Total: IN={total_in:,} (cached={total_cached:,} ~{overall_cache_pct}%) OUT={total_out:,}")
 
-    return filepath
+    return filepath, total_in, total_out
 
 
 def main():
@@ -370,32 +443,53 @@ def main():
     out_dir = "output/matriz"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Procesar
-    print(f"🎯 {len(escuelas)} escuelas × {len(dim_prompts)} dimensiones\n")
+    # Cargar tracking de escuelas ya procesadas
+    print("\n📋 Cargando tracking...")
+    processed_schools = load_processed_schools()
+
+    # Filtrar escuelas pendientes
+    pending_schools = [esc for esc in escuelas if esc not in processed_schools]
+    skipped = len(escuelas) - len(pending_schools)
+
+    print(f"✅ Ya procesadas: {skipped}")
+    print(f"⏳ Pendientes: {len(pending_schools)}\n")
+
+    if not pending_schools:
+        print("✨ Todas las escuelas ya han sido procesadas")
+        return
+
+    # Procesar solo escuelas pendientes
+    print(f"🎯 {len(pending_schools)} escuelas × {len(dim_prompts)} dimensiones\n")
 
     ok = 0
     fail = 0
 
-    for i, esc in enumerate(escuelas, 1):
+    for i, esc in enumerate(pending_schools, 1):
         print(f"\n{'#'*80}")
-        print(f"# ESCUELA [{i}/{len(escuelas)}]: {esc}")
+        print(f"# ESCUELA [{i}/{len(pending_schools)}]: {esc}")
         print(f"{'#'*80}")
 
         try:
-            result = process_escuela(esc, dim_prompts, all_docs, out_dir)
-            if result:
+            filepath, total_in, total_out = process_escuela(esc, dim_prompts, all_docs, out_dir)
+
+            if filepath:
+                # Guardar en tracking
+                save_processed_school(esc, filepath, total_in, total_out)
                 ok += 1
             else:
                 fail += 1
+
         except Exception as e:
             print(f"❌ Error procesando {esc}: {e}")
             fail += 1
 
     # Resumen
+    total_processed = len(processed_schools) + ok
     print(f"\n{'='*80}")
     print(f"📊 RESUMEN")
     print(f"{'='*80}")
-    print(f"✅ {ok} escuelas procesadas")
+    print(f"✅ {ok} escuelas nuevas procesadas")
+    print(f"⏭️  {skipped} escuelas ya procesadas (omitidas)")
     print(f"❌ {fail} escuelas fallidas")
     print(f"📁 {out_dir}")
     print(f"{'='*80}\n")

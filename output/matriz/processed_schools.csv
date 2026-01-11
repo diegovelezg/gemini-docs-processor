@@ -1,0 +1,9 @@
+timestamp,school,filepath,total_in,total_out
+2026-01-10 22:12:50,CAJ_CRISTO_,output/matriz/cajcristo_matriz_completa.md,292498,35257
+2026-01-10 22:23:14,CAJ_MANUE_,output/matriz/cajmanue_matriz_completa.md,349560,46214
+2026-01-10 22:30:40,LIM_FANNI_,output/matriz/limfanni_matriz_completa.md,313199,29744
+2026-01-10 22:34:13,LIM_FEYAL_,output/matriz/limfeyal_matriz_completa.md,91346,11188
+2026-01-10 22:44:38,LIM_GUATE_,output/matriz/limguate_matriz_completa.md,344620,46300
+2026-01-10 22:49:17,PUN_SANAG_,output/matriz/punsanag_matriz_completa.md,188145,17441
+2026-01-10 22:58:22,SAN_BILING_,output/matriz/sanbiling_matriz_completa.md,399261,39854
+2026-01-10 23:07:33,SAN_MARTIN_,output/matriz/sanmartin_matriz_completa.md,443713,40872
