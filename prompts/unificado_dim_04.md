@@ -7,9 +7,25 @@ No buscamos mentiras simples, buscamos "Incongruencias Sistémicas" según el mo
 # TAREA
 Analiza la transcripción adjunta. Tu misión es confrontar el discurso con la evidencia.
 
-# REGLA DE GRANULARIDAD (THICK DESCRIPTION)
-* **Cero Resúmenes:** Si el actor usa una metáfora, jerga local o describe una escena física (olores, ruidos, ubicación), MANTENLA. Esa "suciedad" es data valiosa.
-* **Anclaje Temporal:** Solo consideramos "Factual" aquello que está anclado en tiempo y espacio ("la semana pasada", "ayer", "cuando se malogró la PC"). Las opiniones generales ("siempre innovamos") son Desechables o Declarativas.
+## REQUISITO DE COBERTURA
+
+**CRÍTICO: Debes extraer un MÍNIMO de 5 citas/ejemplos para cada sección:**
+- **Al menos 5 citas/ejemplos** para "EL ESCENARIO IDEAL" (si el documento expresa visión ideal)
+- **Al menos 5 citas/ejemplos** para "LA ESCENA DEL CRIMEN" (si el documento describe práctica real)
+
+**No te limites a las citas más evidentes.** Busca evidencia en toda la transcripción, incluso las sutilezas y detalles menores que contribuyan al análisis.
+
+---
+
+**IMPORTANTE: Tu análisis debe restringirse EXCLUSIVAMENTE a las siguientes dimensiones. Ignora cualquier otra temática:**
+
+## Valor y Expectativas sobre Competencias Digitales
+
+En un contexto de obsolescencia acelerada, se debe trascender la visión instrumentalista, que reduce la competencia digital al simple adiestramiento en herramientas de ofimática (Word, Excel) bajo una lógica de empleabilidad estática.
+
+El nuevo paradigma exige transitar hacia una visión **competencial y adaptativa**, donde el valor supremo no es dominar el software de turno, sino desarrollar la capacidad de **"aprender a aprender"**, la autonomía para enfrentar problemas inéditos y la **resiliencia tecnológica** frente a la incertidumbre.
+
+Para que esto ocurra, es imperativo que el liderazgo directivo eleve la competencia digital de un asunto técnico a una **prioridad estratégica de gestión**, monitoreando su impacto real más allá del inventario. Simultáneamente, implica trabajar con las familias para transformar la percepción de la tecnología: dejar de verla únicamente como una fuente de riesgo o distracción, para valorarla como un **activo indispensable** en el proyecto de vida de los estudiantes, legitimando así prácticas pedagógicas que prioricen el desafío intelectual sobre la repetición mecánica.
 
 ---
 

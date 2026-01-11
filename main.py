@@ -30,7 +30,7 @@ DRIVE_FOLDER_ID = "1jyc53AO7qEDnVcHBfmrOPbJLj3fFCrm8"  # Reemplazar con el ID re
 
 # Configuración API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 PROMPTS_TO_USE = os.getenv("PROMPTS_TO_USE", "01_disonancias.md,02_complejidad.md, 03_clima.md, 04_hacks.md, 05_estratega.md")
 
 # 🔧 MODO DE PROCESAMIENTO: CAMBIA AQUÍ 🔧
