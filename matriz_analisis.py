@@ -144,16 +144,18 @@ def get_content(doc_url: str) -> str:
 
 
 def filter_by_prefix(docs: List[str], prefix: str) -> List[str]:
-    """Filtra por prefijo (case insensitive)"""
+    """Filtra por prefijo Y que contenga 'TIC' (case insensitive)"""
     filtered = []
     prefix_lower = prefix.lower()
 
     for url in docs:
         title = get_title(url)
-        if prefix_lower in title.lower():
+        title_lower = title.lower()
+        # Debe cumplir ambos: prefijo Y contener "tic"
+        if prefix_lower in title_lower and 'tic' in title_lower:
             filtered.append(url)
 
-    print(f"   ✓ {len(filtered)} docs para '{prefix}'")
+    print(f"   ✓ {len(filtered)} docs para '{prefix}' (conteniendo 'TIC')")
     return filtered
 
 
@@ -252,6 +254,14 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
     # Token counters por dimensión
     tokens_por_dim = [[0, 0] for _ in range(4)]  # [in, out] para cada dimensión
 
+    # Títulos de las dimensiones
+    dim_titles = [
+        "Pedagogía de Alta Demanda Cognitiva e Integración Digital",
+        "Soporte e Infraestructura",
+        "Ciudadanía y Ética Digital",
+        "Valor y Expectativas sobre Competencias Digitales"
+    ]
+
     # Procesar cada documento
     for doc_idx, doc_url in enumerate(escuela_docs, 1):
         title = get_title(doc_url)
@@ -278,9 +288,9 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
             try:
                 result, in_t, out_t = call_gemini(full_prompt, cache)
 
-                # Formatear resultado
+                # Formatear resultado con título de dimensión
                 formatted = f"\n{'='*80}\n"
-                formatted += f"📐 DIMENSIÓN {dim_idx + 1}\n"
+                formatted += f"📐 DIMENSIÓN {dim_idx + 1}: {dim_titles[dim_idx]}\n"
                 formatted += f"{'='*80}\n\n"
                 formatted += result
                 formatted += f"\n{'='*80}\n\n"

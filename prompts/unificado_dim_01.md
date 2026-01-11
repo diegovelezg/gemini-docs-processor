@@ -17,6 +17,13 @@ Analiza la transcripción adjunta. Tu misión es confrontar el discurso con la e
 
 ---
 
+**SI LA TRANSCRIPCIÓN NO CONTIENE INFORMACIÓN RELEVANTE para estas dimensiones específicas, indica explícitamente:**
+> ⚠️ Esta transcripción no contiene información relevante sobre las dimensiones analizadas.
+
+No extraigas citas forzadas o tangenciales. Es preferible indicar la ausencia de contenido relevante que extrapolar.
+
+---
+
 **IMPORTANTE: Tu análisis debe restringirse EXCLUSIVAMENTE a las siguientes dimensiones. Ignora cualquier otra temática:**
 
 ## 1. Práctica Pedagógica de Alta Demanda Cognitiva
