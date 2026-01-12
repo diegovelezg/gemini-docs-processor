@@ -12,15 +12,19 @@ from google.genai import types
 
 load_dotenv()
 
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1kwoGjcvX39sM1at1KW5Rhx9ZfADCqBYy")
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1XQTKZ-4IryrJLuDpZ4bbAT4shp8PdeDz")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+
+OUTPUT_DIR = "output/MATRIZ_TIC_POR_DIMENS-AGENTE-LIMPIOS"
 
 DIMENSION_PROMPTS = [
     "prompts/unificado_dim_01.md",
     "prompts/unificado_dim_02.md",
     "prompts/unificado_dim_03.md",
-    "prompts/unificado_dim_04.md"
+    "prompts/unificado_dim_04.md",
+    "prompts/unificado_dim_05.md",
+    "prompts/unificado_dim_06.md"
 ]
 ESCUELAS_FILE = "prompts/06_matriz_escuelas.md"
 
@@ -35,7 +39,7 @@ def init_client():
 
 def load_processed_schools() -> Set[str]:
     """Carga la lista de escuelas ya procesadas desde el archivo de tracking"""
-    tracking_file = os.path.join("output/matriz", "processed_schools.csv")
+    tracking_file = os.path.join(OUTPUT_DIR, "processed_schools.csv")
     processed = set()
 
     if os.path.exists(tracking_file):
@@ -54,7 +58,7 @@ def load_processed_schools() -> Set[str]:
 
 def save_processed_school(school: str, filepath: str, total_in: int, total_out: int):
     """Guarda información de la escuela procesada en el archivo de tracking"""
-    tracking_file = os.path.join("output/matriz", "processed_schools.csv")
+    tracking_file = os.path.join(OUTPUT_DIR, "processed_schools.csv")
 
     try:
         file_exists = os.path.exists(tracking_file)
@@ -100,11 +104,13 @@ def load_escuelas() -> List[str]:
     return prefixes
 
 
-def scrape_folder(folder_id: str, depth: int = 0) -> List[str]:
+def scrape_folder(folder_id: str, depth: int = 0, single_level: bool = False) -> List[str]:
     """
     Scrapea carpeta de Drive.
-    Nivel 0: asume todo son subcarpetas
-    Nivel 1+: asume todo son documentos
+
+    Args:
+        single_level: Si True, trata los elementos como documentos directamente
+                      (útil cuando todos los docs están en la carpeta raíz)
     """
     indent = "  " * depth
     url = f"https://drive.google.com/drive/folders/{folder_id}"
@@ -114,6 +120,13 @@ def scrape_folder(folder_id: str, depth: int = 0) -> List[str]:
     try:
         r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
+
+        # DEBUG: Guardar HTML para inspección
+        if depth == 0:
+            debug_file = "debug_drive.html"
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                f.write(r.text)
+            print(f"🔍 HTML guardado en {debug_file} ({len(r.text):,} chars)")
 
         soup = BeautifulSoup(r.text, 'html.parser')
 
@@ -126,28 +139,37 @@ def scrape_folder(folder_id: str, depth: int = 0) -> List[str]:
 
         print(f"{indent}📁 {len(ids)} elementos")
 
-        # Nivel 0: son subcarpetas, entrar recursivamente
-        if depth == 0:
-            all_docs = []
-            for fid in ids:
-                docs = scrape_folder(fid, depth + 1)
-                all_docs.extend(docs)
-
-            # Deduplicar
-            seen = set()
-            unique = []
-            for d in all_docs:
-                if d not in seen:
-                    seen.add(d)
-                    unique.append(d)
-
-            print(f"\n📊 TOTAL: {len(unique)} documentos\n")
-            return unique
-
-        # Nivel 1+: son documentos, retornar URLs
-        else:
-            urls = [f"https://docs.google.com/document/d/{did}/edit" for did in ids]
+        # Si es single_level o depth > 0: tratar como documentos
+        if single_level or depth > 0:
+            urls = []
+            for did in ids:
+                doc_url = f"https://docs.google.com/document/d/{did}/edit"
+                # Validar que sea un documento real
+                try:
+                    title = get_title(doc_url)
+                    if title != "Unknown":
+                        urls.append(doc_url)
+                except:
+                    pass
+            print(f"{indent}📄 {len(urls)} documentos válidos")
             return urls
+
+        # Nivel 0: son subcarpetas, entrar recursivamente
+        all_docs = []
+        for fid in ids:
+            docs = scrape_folder(fid, depth + 1)
+            all_docs.extend(docs)
+
+        # Deduplicar
+        seen = set()
+        unique = []
+        for d in all_docs:
+            if d not in seen:
+                seen.add(d)
+                unique.append(d)
+
+        print(f"\n📊 TOTAL: {len(unique)} documentos\n")
+        return unique
 
     except Exception as e:
         print(f"{indent}❌ {e}")
@@ -272,7 +294,32 @@ def call_gemini(prompt: str, cache=None) -> Tuple[str, int, int, int]:
     return resp.text, in_t, cached_t, out_t
 
 
-def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], out_dir: str) -> Tuple[str, int, int]:
+def clasificar_documento(doc_url: str, dim_config: List[Tuple[List[str], str]]) -> List[int]:
+    """Clasifica un documento según siglas en su título.
+
+    Un documento puede matchear con MÚLTIPLES dimensiones.
+    Retorna la lista de índices de dimensiones que coinciden.
+
+    Args:
+        doc_url: URL del documento
+        dim_config: Lista de (siglas, título) por dimensión
+
+    Returns:
+        Lista de índices de dimensiones (0-4) que coinciden
+    """
+    title = get_title(doc_url).upper()
+    dimensiones_que_matchean = []
+
+    for idx, (siglas, _) in enumerate(dim_config):
+        for sigla in siglas:
+            if sigla in title:
+                dimensiones_que_matchean.append(idx)
+                break  # No necesitamos check otras siglas de esta dimensión
+
+    return dimensiones_que_matchean
+
+
+def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str]) -> Tuple[str, int, int]:
     """Procesa todos los documentos de una escuela con todas las dimensiones
 
     Returns:
@@ -293,7 +340,9 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
     # Crear UN SOLO archivo de salida para esta escuela
     safe_name = escuela.replace('_', '').replace('-', '').lower()
     filename = f"{safe_name}_matriz_completa.md"
-    filepath = os.path.join(out_dir, filename)
+    filepath = os.path.join(OUTPUT_DIR, filename)
+
+    num_dims = len(dim_prompts)
 
     # Header del archivo
     from datetime import datetime
@@ -303,7 +352,7 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
     header += f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     header += f"🏫 Escuela: {escuela}\n"
     header += f"📄 Docs: {len(escuela_docs)}\n"
-    header += f"📐 Dimensiones: 4\n"
+    header += f"📐 Dimensiones: {num_dims}\n"
     header += "\n" + "=" * 80 + "\n\n"
 
     # Inicializar archivo
@@ -311,87 +360,139 @@ def process_escuela(escuela: str, dim_prompts: List[str], all_docs: List[str], o
         f.write(header)
 
     # Token counters por dimensión
-    tokens_por_dim = [[0, 0, 0] for _ in range(4)]  # [in, cached, out] para cada dimensión
+    tokens_por_dim = [[0, 0, 0] for _ in range(num_dims)]  # [in, cached, out] para cada dimensión
 
-    # Títulos de las dimensiones
-    dim_titles = [
-        "Pedagogía de Alta Demanda Cognitiva e Integración Digital",
-        "Soporte e Infraestructura",
-        "Ciudadanía y Ética Digital",
-        "Valor y Expectativas sobre Competencias Digitales"
+    # Títulos de las dimensiones con sus siglas para filtrado
+    # Formato: (siglas, título)
+    dim_config = [
+        (["_DOC", "_EST", "_COORD-PED"], "Pedagogía de Alta Demanda Cognitiva"),
+        (["_DOC", "_EST", "_COORD-PED"], "Integración Transversal de Competencias Digitales"),
+        (["_DOC", "_COORD-CIST"], "Soporte e Infraestructura"),
+        (["_DOC", "_EST"],"Ciudadanía y Ética Digital"),
+        (["_DOC", "_EST", "_FAM"], "Valor y Expectativas sobre Competencias Digitales"),
+        (["_DIR", "_DOC", "_EST"], "Competencias Digitales Para Educación Para el Trabajo")
     ]
 
-    # Procesar cada documento
-    for doc_idx, doc_url in enumerate(escuela_docs, 1):
-        title = get_title(doc_url)
-        content = get_content(doc_url)
+    # Validar que haya suficientes títulos
+    if len(dim_config) < num_dims:
+        raise ValueError(f"Faltan títulos de dimensiones: hay {len(dim_config)} pero se necesitan {num_dims}")
 
-        print(f"\n   📖 [{doc_idx}/{len(escuela_docs)}] {title} ({len(content):,} chars)")
+    # Clasificar documentos por dimensión según siglas en el título
+    # Un doc puede pertenecer a múltiples dimensiones
+    docs_por_dim = [[] for _ in range(num_dims)]
+    sin_clasificar = []
 
-        # Crear cache con este documento (se reusa para las 4 dimensiones)
-        full_doc = f"DOCUMENTO: {title}\nURL: {doc_url}\n\n{content}"
-        cache = create_cache(full_doc)
+    for doc_url in escuela_docs:
+        dims_match = clasificar_documento(doc_url, dim_config)
+        if dims_match:
+            for dim_idx in dims_match:
+                docs_por_dim[dim_idx].append(doc_url)
+        else:
+            sin_clasificar.append(doc_url)
 
-        # Header del documento en el MD
-        doc_header = f"\n{'#'*80}\n"
-        doc_header += f"# DOCUMENTO {doc_idx}: {title}\n"
-        doc_header += f"{'#'*80}\n\n"
+    # Logging de distribución
+    print(f"   📦 Distribución de documentos:")
+    for i, (siglas, titulo) in enumerate(dim_config):
+        print(f"      • Dim {i+1} ({titulo}): {len(docs_por_dim[i])} docs")
+    print(f"      • Sin clasificar: {len(sin_clasificar)} docs")
+
+    # Procesar por dimensión (no por documento)
+    for dim_idx, (siglas, titulo) in enumerate(dim_config):
+        dim_docs = docs_por_dim[dim_idx]
+
+        if not dim_docs:
+            print(f"\n   ⏭️  Dim {dim_idx+1} ({titulo}): Sin documentos, saltando...")
+            continue
+
+        print(f"\n   {'='*60}")
+        print(f"   📐 DIMENSIÓN {dim_idx+1}: {titulo}")
+        print(f"   {'='*60}")
+        print(f"   📄 {len(dim_docs)} documentos a procesar")
+
+        # Header de dimensión en el MD
+        dim_header = f"\n{'#'*80}\n"
+        dim_header += f"# DIMENSIÓN {dim_idx+1}: {titulo}\n"
+        dim_header += f"{'#'*80}\n\n"
 
         with open(filepath, 'a', encoding='utf-8') as f:
-            f.write(doc_header)
+            f.write(dim_header)
 
-        # Aplicar los 4 prompts al mismo documento (reutilizando cache)
-        for dim_idx, dim_prompt in enumerate(dim_prompts):
-            # El documento ya está en el cache, NO incluirlo en el prompt
-            # Solo enviar las instrucciones del prompt
+        # Ordenar docs de esta dimensión
+        dim_docs_sorted = sorted(dim_docs, key=lambda url: get_title(url))
+
+        # Procesar documentos de esta dimensión
+        for doc_idx, doc_url in enumerate(dim_docs_sorted, 1):
+            title = get_title(doc_url)
+            content = get_content(doc_url)
+
+            print(f"\n      📖 [{doc_idx}/{len(dim_docs_sorted)}] {title} ({len(content):,} chars)")
+
+            # Header del documento
+            doc_header = f"\n{'-'*80}\n"
+            doc_header += f"## DOCUMENTO {doc_idx}: {title}\n"
+            doc_header += f"{'-'*80}\n\n"
+
+            with open(filepath, 'a', encoding='utf-8') as f:
+                f.write(doc_header)
+
+            # Cache con este documento
+            full_doc = f"DOCUMENTO: {title}\nURL: {doc_url}\n\n{content}"
+            cache = create_cache(full_doc)
+
+            # Aplicar prompt de esta dimensión
+            dim_prompt = dim_prompts[dim_idx]
             prompt_with_cache = f"{dim_prompt}\n\nNOTA: El documento a analizar ha sido proporcionado en el contexto cacheado."
 
             try:
                 result, in_t, cached_t, out_t = call_gemini(prompt_with_cache, cache)
 
-                # Formatear resultado con título de dimensión
-                formatted = f"\n{'='*80}\n"
-                formatted += f"📐 DIMENSIÓN {dim_idx + 1}: {dim_titles[dim_idx]}\n"
-                formatted += f"{'='*80}\n\n"
-                formatted += result
-                formatted += f"\n{'='*80}\n\n"
-
-                # Agregar al archivo
+                # Resultado
                 with open(filepath, 'a', encoding='utf-8') as f:
-                    f.write(formatted)
+                    f.write(result)
+                    f.write(f"\n{'-'*80}\n\n")
 
                 # Acumular tokens
                 tokens_por_dim[dim_idx][0] += in_t
                 tokens_por_dim[dim_idx][1] += cached_t
                 tokens_por_dim[dim_idx][2] += out_t
 
-                # Calcular tokens no-cacheados (billing real)
-                non_cached = in_t - cached_t
-                print(f"      ✅ Dim {dim_idx + 1}: IN={in_t:,} (cached={cached_t:,} ~{cached_t*100//in_t if in_t > 0 else 0}%) OUT={out_t:,}")
+                print(f"         ✅ IN={in_t:,} (cached={cached_t:,}) OUT={out_t:,}")
 
             except Exception as e:
-                print(f"      ❌ Dim {dim_idx + 1}: {e}")
-                error_msg = f"\n{'='*80}\n❌ ERROR EN DIMENSIÓN {dim_idx + 1}: {e}\n{'='*80}\n\n"
+                print(f"         ❌ Error: {e}")
+                error_msg = f"\n❌ ERROR: {e}\n\n"
                 with open(filepath, 'a', encoding='utf-8') as f:
                     f.write(error_msg)
 
-        # Limpiar cache después de procesar las 4 dimensiones
-        cleanup_cache(cache)
-        print(f"      🗑️  Cache limpiado")
+            # Limpiar cache
+            cleanup_cache(cache)
+
+    # Documentos sin clasificar (opcional: listar al final)
+    if sin_clasificar:
+        print(f"\n   ⚠️  Documentos sin clasificar ({len(sin_clasificar)}):")
+        with open(filepath, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'#'*80}\n")
+            f.write(f"# DOCUMENTOS SIN CLASIFICAR\n")
+            f.write(f"{'#'*80}\n\n")
+            for doc_url in sin_clasificar:
+                title = get_title(doc_url)
+                print(f"      • {title}")
+                f.write(f"- {title}\n")
 
     # Footer con resumen de tokens
     footer = "\n" + "=" * 80 + "\n"
     footer += "📊 RESUMEN DE TOKENS POR DIMENSIÓN\n"
     footer += "=" * 80 + "\n"
 
-    for dim_idx in range(4):
+    for dim_idx, (siglas, titulo) in enumerate(dim_config):
         in_t = tokens_por_dim[dim_idx][0]
         cached_t = tokens_por_dim[dim_idx][1]
         out_t = tokens_por_dim[dim_idx][2]
         non_cached = in_t - cached_t
         cache_pct = cached_t * 100 // in_t if in_t > 0 else 0
 
-        footer += f"Dim {dim_idx + 1}: IN={in_t:,} (cached={cached_t:,} ~{cache_pct}%, non-cached={non_cached:,}) OUT={out_t:,}\n"
+        footer += f"Dim {dim_idx + 1} ({titulo}):\n"
+        footer += f"  IN={in_t:,} (cached={cached_t:,} ~{cache_pct}%, non-cached={non_cached:,}) OUT={out_t:,}\n"
 
     total_in = sum(t[0] for t in tokens_por_dim)
     total_cached = sum(t[1] for t in tokens_por_dim)
@@ -433,15 +534,14 @@ def main():
 
     # Obtener docs
     print("📂 Obteniendo documentos...")
-    all_docs = scrape_folder(DRIVE_FOLDER_ID)
+    all_docs = scrape_folder(DRIVE_FOLDER_ID, single_level=True)
 
     if not all_docs:
         print("❌ Sin documentos")
         return
 
     # Output
-    out_dir = "output/matriz"
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Cargar tracking de escuelas ya procesadas
     print("\n📋 Cargando tracking...")
@@ -470,7 +570,7 @@ def main():
         print(f"{'#'*80}")
 
         try:
-            filepath, total_in, total_out = process_escuela(esc, dim_prompts, all_docs, out_dir)
+            filepath, total_in, total_out = process_escuela(esc, dim_prompts, all_docs)
 
             if filepath:
                 # Guardar en tracking
@@ -491,7 +591,7 @@ def main():
     print(f"✅ {ok} escuelas nuevas procesadas")
     print(f"⏭️  {skipped} escuelas ya procesadas (omitidas)")
     print(f"❌ {fail} escuelas fallidas")
-    print(f"📁 {out_dir}")
+    print(f"📁 {OUTPUT_DIR}")
     print(f"{'='*80}\n")
 
 
